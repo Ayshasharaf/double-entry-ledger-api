@@ -84,8 +84,8 @@ src/main/java/com/doubleledger/ledger/
 | 2 | Why is the zero-sum trigger **DEFERRABLE INITIALLY DEFERRED** instead of running after each INSERT? | Legs inserted one row at a time in same txn |
 | 3 | What happens if Java passes zero-sum but someone inserts bad data via SQL directly? | Trigger still rejects at COMMIT |
 | 4 | Why does `journal_entries.idempotency_key` have a UNIQUE constraint **and** `idempotency_keys` table exists separately? | Two layers: domain vs API |
-| 5 | What is `reverses_journal_entry_id` for? Is it used in Java yet? | Schema yes, API no |
-| 6 | What is `metadata JSONB` for? Is it persisted today? | Schema yes — **gap:** not wired in `LedgerPostingService` |
+| 5 | What is `reverses_journal_entry_id` for? Is it used in Java yet? | Reversal API — `POST /transactions/{id}/reversals` |
+| 6 | What is `metadata JSONB` for? Is it persisted today? | Yes — wired in `LedgerPostingService` |
 | 7 | Why `balance_after` on each ledger leg? | Point-in-time audit / reconstruct history |
 
 ### Questions — Account entity
@@ -150,7 +150,7 @@ erDiagram
 | 4 | Why hash `POST:/api/v1/transactions:` + JSON instead of hashing only the idempotency key? |
 | 5 | What is stored in `idempotency_keys.response_body`? |
 | 6 | Why return `200` on replay but `201` on first success? Which header tells the client it was a replay? |
-| 7 | `JournalEntryResponse.fromEntity()` returns `List.of()` for entries — is that intentional or a gap? |
+| 7 | `JournalEntryResponse.fromEntity()` returns legs — is that intentional or a gap? | Yes — `JournalEntryResponseService.toResponse()` loads legs |
 
 ### Questions — posting engine (`executePosting`)
 
@@ -254,11 +254,10 @@ Watch the counts. Then re-read the test assertions and map each to a mechanism i
 
 | Gap | Where you see it | Business impact |
 |-----|------------------|-----------------|
-| No reversals API | `reverses_journal_entry_id` unused | Can't refund/correct in production |
-| Metadata not saved | DTO has field, entity/service skip it | Lost audit context |
-| Empty legs in response | `JournalEntryResponse.fromEntity()` | Clients can't see posting details |
 | No auth | Open API | Can't deploy publicly |
 | Idempotency keys never expire | No TTL job | Table grows forever |
+| No event outbox | Block 2 not started | Downstream can't subscribe to postings |
+| `failed_entries` table | Designed but not implemented | No structured failure audit trail |
 | `ForensicAuditService` | Only on unexpected DB failures | Not full audit trail |
 | `AsyncConfig` forensic executor | Bean exists, not used with `@Async` | Dead config for now |
 
@@ -343,11 +342,20 @@ Design (on paper) `POST /transactions/{id}/reversals`:
 
 Reference: [Modern Treasury reversal API](https://docs.moderntreasury.com/platform/reference/create-ledger-transaction-reversal)
 
-### Exercise E — Write one unit test (optional)
-Pick one pure function to test without Spring:
-- Zero-sum validation logic
-- `Account.debit()` on asset with overdraft disabled
-- `RequestHasher` — same body → same hash
+### Exercise E — Unit tests (done in repo)
+
+Pure-logic tests live under `src/test/java/`:
+
+- `AccountTest` — overdraft / frozen validation
+- `RequestHasherTest` — same body → same hash
+- `LedgerPostingServiceValidationTest` — zero-sum rejection
+- `AccountBalanceServiceTest` — signed-leg balance math
+
+Run without Docker:
+
+```bash
+./mvnw test -Dtest="AccountTest,RequestHasherTest,LedgerPostingServiceValidationTest,AccountBalanceServiceTest"
+```
 
 ---
 
@@ -371,7 +379,7 @@ You **deeply** understand the codebase when you can:
 - [ ] Name 5+ gaps and how you'd implement reversals or TTL
 
 ### Level 4 — Owner
-- [ ] Implement a small feature (reversal, metadata persist, or unit test) following existing patterns
+- [ ] Implement a small feature (auth, idempotency TTL, or outbox) following existing patterns
 - [ ] Defend design choices in a mock interview for 30 minutes
 - [ ] Critique what you'd change before production (auth, outbox, observability)
 
@@ -417,4 +425,4 @@ Day 5  Phase 6 interview questions + Exercise D (design reversal)
 
 ---
 
-*Next step after this doc: pick one P0 gap (reversals, metadata, or unit tests) and implement it using the pattern in `CODEBASE_FLOW.md` Part 12.*
+*Next step after this doc: start Block 2 (transactional outbox) or Block 1 hardening (auth, idempotency TTL). See [README.md](./README.md#whats-next).*

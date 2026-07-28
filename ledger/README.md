@@ -58,11 +58,19 @@ export JAVA_HOME="/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
    User:     ledger_admin
    Password: ledger1234
   ```
-2. Start Spring Boot:
-  ```bash
+2. Start Spring Boot (pick one):
+
+   **Option A — Docker Compose (recommended):**
+   ```bash
+   cd ledger
+   docker compose up --build
+   ```
+
+   **Option B — local Postgres + Maven:**
+   ```bash
    cd ledger
    ./mvnw spring-boot:run
-  ```
+   ```
    Flyway runs migrations automatically on startup. The app listens on **port 8080** by default.
 
 ### Run tests
@@ -71,7 +79,10 @@ export JAVA_HOME="/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
 # All tests
 ./mvnw clean test
 
-# Integration tests only (6 tests)
+# Unit tests only (no Docker required)
+./mvnw test -Dtest="AccountTest,RequestHasherTest,LedgerPostingServiceValidationTest,AccountBalanceServiceTest"
+
+# Integration tests only (requires Docker)
 ./mvnw clean test -Dtest="*IntegrationTest*,LedgerApplicationTests"
 
 # One test class
@@ -84,9 +95,11 @@ export JAVA_HOME="/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
 **Expected result when healthy:**
 
 ```
-Tests run: 6, Failures: 0, Errors: 0, Skipped: 0
+Tests run: 36, Failures: 0, Errors: 0, Skipped: 0
 BUILD SUCCESS
 ```
+
+(Unit tests run without Docker; integration tests require Docker Desktop.)
 
 ---
 
@@ -98,14 +111,16 @@ For **Block 1 (core ledger)**, the app is working when all of these are true:
 | Check                    | How to verify                                                       |
 | ------------------------ | ------------------------------------------------------------------- |
 | Spring context starts    | `LedgerApplicationTests.contextLoads` passes                        |
-| Database schema is valid | Flyway migration `V1__initial_ledger_schema.sql` runs without error |
+| Database schema is valid | Flyway migrations `V1` + `V2` run without error                   |
 | Posting works            | Integration tests pass (balance updates, zero-sum enforced)         |
+| Reversals work           | `ReversalIntegrationTest` passes                                    |
 | Idempotency works        | 50 concurrent retries → 1 create + 49 replays                       |
 | Concurrency is safe      | 10 parallel withdrawals → exactly 1 rejection, no deadlock          |
+| Unit tests pass          | `AccountTest`, `RequestHasherTest`, validation tests (no Docker)    |
 | API is reachable         | `POST /api/v1/accounts` and `POST /api/v1/transactions` return 201  |
 
 
-**What is NOT done yet** (see [What's next](#whats-next)): transaction reversals, unit tests, Docker Compose for local dev, CI pipeline, event outbox.
+**What is NOT done yet** (see [What's next](#whats-next)): authentication, idempotency TTL, event outbox (Block 2).
 
 ---
 
@@ -179,10 +194,20 @@ ledger/
 │   │   └── *Response.java
 │   │
 │   ├── service/
-│   │   ├── LedgerPostingService.java   ← Core posting engine
+│   │   ├── LedgerPostingService.java   ← Core posting engine + reversals
 │   │   ├── IdempotencyService.java     ← API idempotency cache
-│   │   ├── RequestHasher.java          ← SHA-256 fingerprint of request body
+│   │   ├── AccountService.java         ← Account CRUD
+│   │   ├── AccountBalanceService.java  ← Derived balance math
+│   │   └── JournalEntryResponseService.java
+│   │
+│   ├── util/
+│   │   └── RequestHasher.java          ← SHA-256 fingerprint of request body
+│   │
+│   ├── audit/
 │   │   └── ForensicAuditService.java   ← Structured error logging
+│   │
+│   ├── persistence/
+│   │   └── PostgresAdvisoryLockService.java
 │   │
 │   ├── repository/                     ← Spring Data JPA interfaces
 │   │   ├── AccountRepository.java      ← includes findAllByIdsForUpdate()
@@ -191,7 +216,7 @@ ledger/
 │   │   └── IdempotencyKeyRepository.java
 │   │
 │   ├── model/                          ← JPA entities ↔ database tables
-│   │   ├── Account.java                ← debit(), credit(), validateOverdraft()
+│   │   ├── Account.java                ← validateBalance(), overdraft rules
 │   │   ├── JournalEntry.java           ← transaction header
 │   │   ├── LedgerEntry.java            ← one leg (signed amount)
 │   │   └── IdempotencyKey.java         ← cached API response
@@ -202,14 +227,25 @@ ledger/
 ├── src/main/resources/
 │   ├── application.properties          ← DB connection, Flyway, logging
 │   └── db/migration/
-│       └── V1__initial_ledger_schema.sql
+│       ├── V1__initial_ledger_schema.sql
+│       └── V2__derived_balances_and_immutable_postings.sql
+│
+├── docker-compose.yml                  ← app + Postgres, one command
+├── Dockerfile
 │
 └── src/test/java/com/doubleledger/ledger/
     ├── support/
     │   └── PostgresIntegrationTestSupport.java  ← Testcontainers + helpers
+    ├── AccountTest.java                         ← unit: overdraft / frozen
+    ├── util/RequestHasherTest.java              ← unit: hash stability
+    ├── service/
+    │   ├── LedgerPostingServiceValidationTest.java ← unit: zero-sum
+    │   └── AccountBalanceServiceTest.java       ← unit: balance math
     ├── LedgerApplicationTests.java              ← smoke test
     ├── IdempotencyIntegrationTest.java          ← HTTP idempotency (3 tests)
-    └── LedgerPostingConcurrencyIntegrationTest.java ← locking (2 tests)
+    ├── LedgerPostingConcurrencyIntegrationTest.java ← locking (2 tests)
+    ├── ReversalIntegrationTest.java             ← reversals (6 tests)
+    └── TransactionReadIntegrationTest.java      ← GET + metadata (3 tests)
 ```
 
 ---
@@ -349,7 +385,7 @@ Both use **Postgres advisory locks** (`pg_advisory_xact_lock`) to serialize conc
 1. **Double-entry invariant** — every journal entry's legs sum to zero (debits = credits).
 2. **No floats** — all money stored as `BIGINT` minor units (cents).
 3. **Single currency per transaction** — multi-currency requires explicit FX/clearing accounts (v2).
-4. **Immutability** — entries are never edited or deleted; corrections will be reversals (not yet implemented).
+4. **Immutability** — entries are never edited or deleted; corrections use reversals (`POST /transactions/{id}/reversals`).
 
 ### Concurrency rules
 
@@ -381,7 +417,22 @@ Both use **Postgres advisory locks** (`pg_advisory_xact_lock`) to serialize conc
 
 ### Philosophy
 
-Integration tests boot the **real Spring application** against a **real PostgreSQL** database. No mocks for the database — this proves Flyway migrations, JPA mappings, locking, and triggers all work together.
+Integration tests boot the **real Spring application** against a **real PostgreSQL** database. Unit tests cover pure validation logic without Spring or Docker.
+
+### Unit tests (no Docker)
+
+| Test class | What it proves |
+| ---------- | -------------- |
+| `AccountTest` | Overdraft limits, frozen account rejection |
+| `RequestHasherTest` | Same body → same hash; key order independence |
+| `LedgerPostingServiceValidationTest` | Unbalanced legs, invalid direction, missing key |
+| `AccountBalanceServiceTest` | Signed-leg balance math per account type |
+
+```bash
+./mvnw test -Dtest="AccountTest,RequestHasherTest,LedgerPostingServiceValidationTest,AccountBalanceServiceTest"
+```
+
+### Integration tests (Docker required)
 
 ### Tools
 
@@ -397,17 +448,23 @@ Integration tests boot the **real Spring application** against a **real PostgreS
 | **Maven Surefire**   | Runs tests via `./mvnw test`                         |
 
 
-### Test suite (6 tests)
+### Test suite (36 tests)
 
 
 | Test                                                          | Layer   | What it proves                                       |
 | ------------------------------------------------------------- | ------- | ---------------------------------------------------- |
+| `AccountTest` (5)                                             | Unit    | Overdraft / frozen validation                        |
+| `RequestHasherTest` (5)                                       | Unit    | Deterministic request fingerprints                   |
+| `LedgerPostingServiceValidationTest` (4)                      | Unit    | Zero-sum and leg validation                          |
+| `AccountBalanceServiceTest` (4)                               | Unit    | Balance math per account type                        |
 | `contextLoads`                                                | Smoke   | Spring Boot + Postgres + Flyway all wire up          |
 | `sameIdempotencyKey_concurrentPosts_createSingleJournalEntry` | HTTP    | 50 threads, 1 create + 49 replays                    |
 | `sameIdempotencyKey_differentPayload_returns409`              | HTTP    | Same key + different amount → conflict               |
 | `sequentialReplay_returns200WithReplayHeader`                 | HTTP    | Retry returns cached response                        |
 | `concurrentWithdrawals_exhaustBalanceExactlyOneFails`         | Service | 10 threads, balance for 9 → 1 rejection, balance = 0 |
 | `crossAccountTransfers_doNotDeadlock`                         | Service | 40 bidirectional A↔B transfers, no deadlock          |
+| `ReversalIntegrationTest` (6)                                 | HTTP    | Reversal restores balances, idempotency, 409/404     |
+| `TransactionReadIntegrationTest` (3)                          | HTTP    | GET transaction returns legs + metadata              |
 
 
 ### How tests get a database
@@ -431,9 +488,18 @@ Every test class extends `PostgresIntegrationTestSupport`, which provides:
 
 ---
 
-## Docker — what it does here
+## Docker
 
-**Docker is used for testing, not for running the app (yet).**
+### Docker Compose — run app + Postgres
+
+```bash
+cd ledger
+docker compose up --build
+```
+
+App: `http://localhost:8080` · Postgres: `localhost:5433`
+
+### Docker for integration tests
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -444,7 +510,7 @@ Every test class extends `PostgresIntegrationTestSupport`, which provides:
 │       │                      (ephemeral, destroyed after) │
 │       ▼                                                   │
 │  Spring Boot test context connects to that Postgres       │
-│  Flyway runs V1 migration                                 │
+│  Flyway runs V1 + V2 migrations                           │
 │  Tests run against real schema + real locks + real triggers│
 └──────────────────────────────────────────────────────────┘
 ```
@@ -452,12 +518,26 @@ Every test class extends `PostgresIntegrationTestSupport`, which provides:
 
 | Scenario                                | Docker needed?                                                   |
 | --------------------------------------- | ---------------------------------------------------------------- |
+| Run unit tests                          | **No**                                                           |
 | Run integration tests                   | **Yes** — Testcontainers requires Docker running                 |
 | Run the app locally (`spring-boot:run`) | **No** — uses Postgres at `localhost:5433`                       |
+| Run app via Docker Compose              | **Yes** — `docker compose up --build`                            |
 | Run tests without Docker                | Use `-Dtest.useLocalPostgres=true` + local Postgres on port 5433 |
 
 
-**Make sure Docker Desktop is running before `./mvnw test`.**
+**Make sure Docker Desktop is running before integration tests or `./mvnw test`.**
+
+---
+
+## CI
+
+GitHub Actions runs `./mvnw clean test` on every push/PR to `main`:
+
+```
+.github/workflows/ci.yml
+```
+
+Requires Docker on the runner (provided by `ubuntu-latest`) for Testcontainers.
 
 ---
 
@@ -499,6 +579,21 @@ curl -s -X POST http://localhost:8080/api/v1/transactions \
 curl -s http://localhost:8080/api/v1/accounts/<account-uuid> | jq
 ```
 
+### Reverse a transaction
+
+```bash
+curl -s -X POST "http://localhost:8080/api/v1/transactions/<journal-entry-uuid>/reversals" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 660e8400-e29b-41d4-a716-446655440001" \
+  -d '{ "description": "undo transfer" }' | jq
+```
+
+### Get a transaction
+
+```bash
+curl -s http://localhost:8080/api/v1/transactions/<journal-entry-uuid> | jq
+```
+
 ### Retry (idempotent replay)
 
 Send the exact same request again with the same `Idempotency-Key`:
@@ -510,19 +605,15 @@ Idempotent-Replayed: true
 
 ---
 
-## Limitations (v1)
+## Limitations
 
 
 | Limitation                          | Detail                                                                                 |
 | ----------------------------------- | -------------------------------------------------------------------------------------- |
-| **No transaction reversals**        | Schema supports `reverses_journal_entry_id` but no API endpoint yet                    |
 | **Single currency per transaction** | Cross-currency FX not supported                                                        |
-| **Denormalized balance**            | `accounts.balance_minor_units` is cached — hot accounts become a throughput bottleneck |
-| **No unit tests**                   | Only integration tests exist today                                                     |
-| **No Docker Compose**               | App + Postgres not bundled for one-command local dev                                   |
-| **No CI pipeline**                  | Tests not automated on push yet                                                        |
+| **Derived balance cost**            | Balance is `SUM(ledger_entries)` — hot accounts can be a read bottleneck at scale      |
 | **No authentication**               | API is open — no auth layer                                                            |
-| **No event outbox**                 | Downstream systems can't subscribe to ledger events yet                                |
+| **No event outbox**                 | Downstream systems can't subscribe to ledger events yet (Block 2)                        |
 | **Idempotency keys never expire**   | No TTL/cleanup policy                                                                  |
 | **failed_entries table**            | Designed in schema docs but not implemented in code                                    |
 
@@ -531,14 +622,13 @@ Idempotent-Replayed: true
 
 ## What's next
 
-Recommended order for Block 1 completion and Block 2 start:
+Block 1 polish is largely complete. Recommended next steps:
 
 ```
-Phase A — Finish Block 1
-  ├── Unit tests (validation, overdraft, zero-sum rejection)
-  ├── POST /transactions/{id}/reversals endpoint
-  ├── Docker Compose (app + Postgres, one command)
-  └── GitHub Actions CI (run tests on every push)
+Phase A — Block 1 hardening (remaining)
+  ├── Authentication / API keys
+  ├── Idempotency key TTL + cleanup job
+  └── failed_entries table (optional)
 
 Phase B — Block 2 (event layer)
   ├── Transactional outbox table
