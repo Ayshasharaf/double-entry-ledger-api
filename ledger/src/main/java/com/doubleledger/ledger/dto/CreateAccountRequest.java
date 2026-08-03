@@ -1,32 +1,47 @@
 package com.doubleledger.ledger.dto;
 
+import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.validation.constraints.NotBlank;
+
 import java.util.UUID;
 
 /**
  * This class represents the exact JSON payload sent by a client
  * to create a new financial ledger account.
  */
+@Schema(description = "Create a ledger account. Only name, accountType, normalBalance, and currency are required.")
 public class CreateAccountRequest {
 
-    // Unique ID provided by the client (allows safe client-side ID generation)
+    @Schema(
+            description = "Optional. If omitted, the server generates a UUID.",
+            requiredMode = Schema.RequiredMode.NOT_REQUIRED,
+            example = "550e8400-e29b-41d4-a716-446655440000"
+    )
     private UUID id;
 
-    // The human-readable name of the account (e.g., "Customer A's Checking")
+    @NotBlank
+    @Schema(description = "Human-readable account name.", example = "demo-wallet")
     private String name;
 
-    // Must match our database types: asset, liability, equity, revenue, expense
+    @NotBlank
+    @Schema(
+            description = "One of: asset, liability, equity, revenue, expense.",
+            example = "asset"
+    )
     private String accountType;
 
-    // 'D' (Debit) or 'C' (Credit) representing how this account normally holds balance
+    @NotBlank
+    @Schema(description = "Normal balance side: D (debit) or C (credit).", example = "D")
     private String normalBalance;
 
-    // ISO 4217 Currency code (e.g., "USD", "EUR")
+    @NotBlank
+    @Schema(description = "ISO 4217 currency code.", example = "USD")
     private String currency;
 
-    // Flag indicating if this account is allowed to drop below 0
+    @Schema(description = "Whether the account may go below zero. Defaults to false if omitted.")
     private boolean allowOverdraft;
 
-    // The maximum overdraft limit. We use 'long' primitive to default to 0 and avoid nulls!
+    @Schema(description = "Max overdraft in minor units when allowOverdraft is true. Defaults to 0 if omitted.")
     private long overdraftLimitMinorUnits;
 
     // --- Empty Constructor (Required by Jackson for JSON parsing) ---
