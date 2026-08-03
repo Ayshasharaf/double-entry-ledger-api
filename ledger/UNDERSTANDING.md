@@ -132,13 +132,15 @@ In DoubleLedger, one transfer creates:
 | **Ledger entries** | The legs — one debit leg, one credit leg per account touched |
 
 ```
-journal_entries          ledger_entries
+journal_entries          ledger_entries (signed amounts in DB)
 ┌─────────────────┐      ┌──────────────────────────┐
-│ Transfer $5     │──────│ Alice: -500 (credit leg) │
-│ idempotency_key │      │ Bob:   +500 (debit leg)  │
+│ Transfer $5     │──────│ Alice: +500 (CREDIT leg) │
+│ idempotency_key │      │ Bob:   -500 (DEBIT leg)  │
 └─────────────────┘      └──────────────────────────┘
-                         -500 + 500 = 0  ✓
+                         +500 + (-500) = 0  ✓
 ```
+
+> **Storage rule:** `DEBIT` → negative `amount_minor_units`, `CREDIT` → positive (`LedgerPostingService.toSignedLegs`). Economic wallet balance uses account type + sum of legs (`AccountBalanceService`).
 
 ---
 
@@ -153,7 +155,7 @@ Double-entry gives you four things a simple balance field cannot:
 | Need | How double-entry helps |
 |------|------------------------|
 | **No lost money** | Every dollar in = a dollar out somewhere. Nothing appears from thin air. |
-| **Full audit trail** | You can replay every leg and reconstruct any balance at any point in time. |
+| **Full audit trail** | Every leg is stored with `balance_after`; balances are **derived** from leg history (see `V2` migration). There is no `GET`-by-account history API yet — only single transaction read. |
 | **Corrections without lies** | You don't edit old rows — you post a reversal. History stays honest. |
 | **Regulatory trust** | Finance teams, auditors, and partners expect this model. |
 
@@ -214,16 +216,17 @@ PostgreSQL wraps the whole post in one transaction. If anything fails (overdraft
 
 ```mermaid
 flowchart TD
-    START[Begin transaction] --> LOCK[Lock accounts]
-    LOCK --> UPDATE[Update balances]
-    UPDATE --> INSERT[Insert journal + ledger rows]
-    INSERT --> CHECK{DB trigger:<br/>debits = credits?}
+    START[Begin transaction] --> LOCK[Lock account rows FOR UPDATE]
+    LOCK --> INSERT[Insert journal header + ledger legs]
+    INSERT --> CHECK{DB trigger:<br/>legs sum to zero?}
     CHECK -->|Yes| COMMIT[COMMIT ✓]
     CHECK -->|No| ROLLBACK[ROLLBACK ✗<br/>nothing saved]
 
     style COMMIT fill:#d4edda
     style ROLLBACK fill:#f8d7da
 ```
+
+Balances are **not** stored on `accounts` (column removed in `V2__derived_balances_and_immutable_postings.sql`). Each leg records `balance_after`; API reads recompute from `ledger_entries`.
 
 **Why required:** Partial updates = lost or duplicated money.
 
@@ -328,7 +331,7 @@ sequenceDiagram
 
     Note over P,DB: LOCK #3 — account rows
     P->>DB: SELECT accounts ... FOR UPDATE
-    P->>DB: INSERT journal_entries, UPDATE accounts, INSERT ledger_entries
+    P->>DB: INSERT journal_entries + ledger_entries
 
     P-->>I: JournalEntry
     I->>DB: INSERT idempotency_keys
@@ -340,9 +343,9 @@ sequenceDiagram
 |------|------|--------|---------------|---------------------|
 | **#1 API advisory** | `IdempotencyService.java` | `acquireAdvisoryLock()` | Logical slot for `"api-idempotency:" + header key` | Two HTTP retries both miss `idempotency_keys` cache and both call posting |
 | **#2 Domain advisory** | `LedgerPostingService.java` | `acquireIdempotencyAdvisoryLock()` | Logical slot for `idempotencyKey.toString()` (no prefix — different hash from #1) | Two threads both miss `journal_entries` check and both insert the same business event |
-| **#3 Row lock** | `AccountRepository.java` | `findAllByIdsForUpdate()` | Actual rows in `accounts` (`SELECT ... FOR UPDATE`, IDs sorted) | Two transfers updating the same wallet at once; also avoids deadlock when A→B and B→A run together |
+| **#3 Row lock** | `AccountRepository.java` | `findAllByIdsForUpdate()` | Actual rows in `accounts` (`SELECT ... FOR UPDATE`, IDs sorted) | Two concurrent posts touching the same wallet; sorted order avoids deadlock on A↔B transfers |
 
-**Why advisory lock + row lock?** Advisory locks serialize **idempotency key handling** without needing a row in a table yet. Row locks serialize **balance updates** on real account rows. See [PostgreSQL explicit locking](https://www.postgresql.org/docs/current/explicit-locking.html) and the project's `CODEBASE_FLOW.md` § "Pessimistic locking + sorted account IDs".
+**Why advisory lock + row lock?** Advisory locks serialize **idempotency key handling** without needing a row in a table yet. Row locks serialize **posting** while derived balances are computed from existing legs plus new amounts in memory. See [PostgreSQL explicit locking](https://www.postgresql.org/docs/current/explicit-locking.html) and the project's `CODEBASE_FLOW.md` § "Pessimistic locking + sorted account IDs".
 
 **Why two advisory locks (API + domain)?** Two layers, two tables, two code paths:
 
@@ -354,6 +357,8 @@ sequenceDiagram
 Even if the API cache failed, domain idempotency still blocks a duplicate post. Even if domain logic were called from another endpoint later, the API layer still replays the exact HTTP response. See `README.md` § "Two idempotency layers".
 
 **On a retry (cache hit):** only LOCK #1 runs briefly — `postingService` is never called, so LOCK #2 and #3 never happen.
+
+**Reversals** add another advisory lock: `reversal-target:{journalEntryId}` so two reversals of the same entry cannot race.
 
 **Tests that prove lock safety:** `LedgerPostingConcurrencyIntegrationTest.java` (parallel withdrawals, bidirectional A↔B without deadlock).
 
@@ -369,7 +374,7 @@ Both `IdempotencyService.executePostTransaction()` and `LedgerPostingService.pos
 flowchart TD
     START["@Transactional starts"] --> L1["LOCK #1 + read idempotency_keys"]
     L1 --> POST["postTransaction() — LOCK #2 + LOCK #3"]
-    POST --> WRITES["journal_entries + accounts + ledger_entries<br/>(still uncommitted)"]
+    POST --> WRITES["journal_entries + ledger_entries<br/>(still uncommitted)"]
     WRITES --> CACHE["persistCache → idempotency_keys<br/>(still uncommitted)"]
     CACHE --> OK{Any error?}
     OK -->|No| COMMIT["COMMIT ✓<br/>all writes visible, locks released"]
@@ -386,11 +391,12 @@ flowchart TD
 | Fewer than 2 legs | `executePosting()` Java check | 400 | Nothing written — failed before any INSERT |
 | Debits ≠ credits (`sum != 0`) | `executePosting()` Java check | 400 | Nothing written |
 | Account not found | `executePosting()` Java check | 400 | Nothing written |
-| Overdraft not allowed | `Account.validateOverdraft()` | 400 | Nothing written — may have INSERTed `journal_entries` first, but **rollback removes it too** |
-| Legs don't sum to zero at commit | PostgreSQL deferred trigger `trg_check_journal_entry_balances` | 500 | **Entire transaction** rolled back — journal, accounts, ledger entries, idempotency cache |
+| Overdraft not allowed | `Account.validateBalance()` | 400 | Nothing committed — journal header may be INSERTed first, but **rollback removes it** |
+| Frozen or closed account | `Account.validateBalance()` | 500 | `IllegalStateException` → generic handler; nothing committed |
+| Legs don't sum to zero at commit | PostgreSQL deferred trigger `trg_check_journal_entry_balances` | 500 | **Entire transaction** rolled back — journal, ledger entries, idempotency cache |
 | Same key, different body | `IdempotencyService.replayCached()` | 409 | No posting ran — nothing to roll back |
 
-**Important detail:** `journal_entries` is saved **before** the leg loop, but it is still inside the same transaction. If `account.debit()` throws (overdraft) or the DB trigger fails at commit, the journal header row is **not** left behind — rollback removes it.
+**Important detail:** `journal_entries` is saved **before** the leg loop, but it is still inside the same transaction. If `validateBalance()` throws (overdraft, frozen, closed) or the DB trigger fails at commit, the journal header row is **not** left behind — rollback removes it.
 
 **Idempotency cache:** `idempotency_keys` is written **after** posting returns, still in the same transaction. If posting fails, the API cache row is **not** saved either — so a retry can safely attempt the post again.
 
@@ -401,7 +407,7 @@ flowchart TD
 ```
 Think of the whole first-time request as one shopping cart checkout:
 
-  Items added to cart  =  journal + accounts + ledger + idempotency cache
+  Items added to cart  =  journal header + ledger legs + idempotency cache
   Payment fails        =  ROLLBACK
   Result               =  cart emptied — as if you never checked out
 ```
@@ -461,11 +467,13 @@ ACID
   All-or-nothing — partial updates never commit
 
 CONCURRENCY
-  Lock accounts before updating — one winner per balance
-  Three locks on first post: API advisory, domain advisory, account FOR UPDATE
+  Lock accounts before posting — one winner per balance change
+  Three locks on first HTTP post: API advisory, domain advisory, account FOR UPDATE
+  Reversals also use reversal-target advisory lock
 
 ROLLBACK
   One @Transactional — any error before commit = nothing saved, all locks released
+  Balances live in ledger leg history, not an accounts column (V2)
 
 IDEMPOTENCY
   Same request key + same body = same result, never charged twice
@@ -488,4 +496,4 @@ IDEMPOTENCY
 
 ---
 
-*Written as part of the DoubleLedger project — Block 1 core ledger.*
+*Written as part of the DoubleLedger project — core ledger API (accounts, postings, reversals, idempotency).*

@@ -26,9 +26,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@AutoConfigureRestTestClient
-class IdempotencyIntegrationTest extends PostgresIntegrationTestSupport {
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT) //Spring Boot test with random port
+@AutoConfigureRestTestClient //injects a RestTestClient for http calls without starting a browser
+class IdempotencyIntegrationTest extends PostgresIntegrationTestSupport { //inherits db setup and helpers like createAssetAccount and fundAccount
 
     private static final int CONCURRENT_REPLAY_THREADS = 50;
 

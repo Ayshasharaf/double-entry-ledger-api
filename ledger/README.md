@@ -4,24 +4,51 @@ A **double-entry financial ledger** built with **Java 21**, **Spring Boot 4**, a
 
 Money never appears or disappears — it only moves. Every transaction is recorded as balanced legs (debits = credits), stored atomically, and protected against duplicate requests and concurrent race conditions.
 
-This is **Block 1** of a larger system. Later blocks (event outbox, webhooks, fraud rules) will consume ledger events — this service is scoped to be the single source of truth for balances.
+This repository is a **complete, self-contained ledger service** for learning and demos: posting, reversals, idempotency, and concurrency control. It is intentionally **not** a full production platform (see [Limitations](#limitations)).
+
+---
+
+## What this project is
+
+**DoubleLedger** is a **ledger API**: create accounts, post **balanced multi-leg journal entries**, read balances and history, and **reverse** mistakes — over HTTP with PostgreSQL as the source of truth.
+
+It is **not** a payment processor (Stripe) or a full bank core. It sits in the same category as the **ledger layer** in products like **[Modern Treasury](https://www.moderntreasury.com/)** and **[Formance Ledger](https://docs.formance.com/modules/ledger)** — the service that owns **double-entry books** while payments, login, and cards live elsewhere.
+
+```
+Your app / payment service          ← optional, not in this repo
+        │  POST /api/v1/transactions + Idempotency-Key
+        ▼
+DoubleLedger (this repo)            ← accounts, postings, reversals, idempotency
+        ▼
+PostgreSQL                          ← triggers, locks, ACID
+```
+
+**Who uses it:** backend developers calling the REST API locally or via Docker. The API is **open** (no auth) — fine for learning; do not expose it on the public internet as-is.
+
+**Related docs in this repo:** [UNDERSTANDING.md](./UNDERSTANDING.md) (accounting intuition), [CODEBASE_LEARNING.md](./CODEBASE_LEARNING.md) (guided study), [ARCHITECTURE_TEACHING_GUIDE.md](./ARCHITECTURE_TEACHING_GUIDE.md) (layer-by-layer tour).
 
 ---
 
 ## Table of contents
 
-1. [Quick start](#quick-start)
-2. [Is the app "complete"?](#is-the-app-complete)
-3. [Architecture overview](#architecture-overview)
-4. [Code map](#code-map)
-5. [Data flow — start to finish](#data-flow--start-to-finish)
-6. [Database design](#database-design)
-7. [Rules & principles](#rules--principles)
-8. [Testing](#testing)
-9. [Docker — what it does here](#docker--what-it-does-here)
-10. [API examples](#api-examples)
-11. [Limitations (v1)](#limitations-v1)
-12. [What's next](#whats-next)
+1. [What this project is](#what-this-project-is)
+2. [Quick start](#quick-start)
+3. [Walkthrough — first transfer end-to-end](#walkthrough--first-transfer-end-to-end)
+4. [API reference](#api-reference)
+5. [Is the app "complete"?](#is-the-app-complete)
+6. [Architecture overview](#architecture-overview)
+7. [Code map](#code-map)
+8. [Data flow — start to finish](#data-flow--start-to-finish)
+9. [Database design](#database-design)
+10. [Rules & principles](#rules--principles)
+11. [Testing](#testing)
+12. [Docker — what it does here](#docker--what-it-does-here)
+13. [CI](#ci)
+14. [API examples](#api-examples)
+15. [What I learned](#what-i-learned)
+16. [Limitations](#limitations)
+17. [Tech stack](#tech-stack)
+18. [Further reading](#further-reading)
 
 ---
 
@@ -38,16 +65,7 @@ This is **Block 1** of a larger system. Later blocks (event outbox, webhooks, fr
 | **Docker**     | Required for integration tests (Testcontainers). Optional for running the app. |
 
 
-**Set Java (if your default is 17):**
-
-```bash
-# Option A — Java 26 (already on your machine)
-export JAVA_HOME="/opt/homebrew/Cellar/openjdk/26.0.1/libexec/openjdk.jdk/Contents/Home"
-
-# Option B — install Java 21
-brew install openjdk@21
-export JAVA_HOME="/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
-```
+**Java version:** the project targets **Java 21** (`pom.xml`). If `./mvnw` fails with a Java version error, point `JAVA_HOME` at JDK 21+ (e.g. `brew install openjdk@21` on macOS).
 
 ### Run the app
 
@@ -59,18 +77,8 @@ export JAVA_HOME="/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
    Password: ledger1234
   ```
 2. Start Spring Boot (pick one):
-
-   **Option A — Docker Compose (recommended):**
-   ```bash
-   cd ledger
-   docker compose up --build
-   ```
-
+  **Option A — Docker Compose (recommended):**
    **Option B — local Postgres + Maven:**
-   ```bash
-   cd ledger
-   ./mvnw spring-boot:run
-   ```
    Flyway runs migrations automatically on startup. The app listens on **port 8080** by default.
 
 ### Run tests
@@ -95,32 +103,156 @@ export JAVA_HOME="/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
 **Expected result when healthy:**
 
 ```
-Tests run: 36, Failures: 0, Errors: 0, Skipped: 0
+Tests run: 37, Failures: 0, Errors: 0, Skipped: 0
 BUILD SUCCESS
 ```
 
-(Unit tests run without Docker; integration tests require Docker Desktop.)
+- **Unit tests** (19 tests) run without Docker.
+- **Integration tests** (18 tests) need **Docker Desktop running** (Testcontainers), or local Postgres on `localhost:5433` with `-Dtest.useLocalPostgres=true`.
+
+---
+
+## Walkthrough — first transfer end-to-end
+
+With the app running (`docker compose up --build` or `./mvnw spring-boot:run` + Postgres on port **5433**), run these steps. Amounts are **minor units** (500 = $5.00 USD).
+
+**1. Create a wallet (asset account)**
+
+```bash
+WALLET=$(curl -s -X POST http://localhost:8080/api/v1/accounts \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "wallet",
+    "accountType": "asset",
+    "normalBalance": "D",
+    "currency": "USD",
+    "allowOverdraft": false,
+    "overdraftLimitMinorUnits": 0
+  }' | jq -r '.id')
+echo "wallet=$WALLET"
+```
+
+**2. Create an equity account (for opening balance — same pattern tests use internally)**
+
+```bash
+EQUITY=$(curl -s -X POST http://localhost:8080/api/v1/accounts \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "opening-equity",
+    "accountType": "equity",
+    "normalBalance": "C",
+    "currency": "USD",
+    "allowOverdraft": false,
+    "overdraftLimitMinorUnits": 0
+  }' | jq -r '.id')
+echo "equity=$EQUITY"
+```
+
+**3. Fund the wallet ($100.00)** — balanced entry: debit wallet, credit equity
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/transactions \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen | tr '[:upper:]' '[:lower:]')" \
+  -d "{
+    \"description\": \"opening balance\",
+    \"legs\": [
+      { \"accountId\": \"$WALLET\", \"amountMinorUnits\": 10000, \"direction\": \"DEBIT\" },
+      { \"accountId\": \"$EQUITY\", \"amountMinorUnits\": 10000, \"direction\": \"CREDIT\" }
+    ]
+  }" | jq
+```
+
+**4. Create a pool account and transfer $5.00 wallet → pool**
+
+```bash
+POOL=$(curl -s -X POST http://localhost:8080/api/v1/accounts \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "cash-pool",
+    "accountType": "asset",
+    "normalBalance": "D",
+    "currency": "USD",
+    "allowOverdraft": false,
+    "overdraftLimitMinorUnits": 0
+  }' | jq -r '.id')
+
+IDEM=$(uuidgen | tr '[:upper:]' '[:lower:]')
+curl -s -X POST http://localhost:8080/api/v1/transactions \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $IDEM" \
+  -d "{
+    \"description\": \"transfer to pool\",
+    \"legs\": [
+      { \"accountId\": \"$WALLET\", \"amountMinorUnits\": 500, \"direction\": \"CREDIT\" },
+      { \"accountId\": \"$POOL\",   \"amountMinorUnits\": 500, \"direction\": \"DEBIT\"  }
+    ]
+  }" | jq
+```
+
+**5. Check balances**
+
+```bash
+curl -s "http://localhost:8080/api/v1/accounts/$WALLET" | jq '.balanceMinorUnits'
+curl -s "http://localhost:8080/api/v1/accounts/$POOL" | jq '.balanceMinorUnits'
+```
+
+**6. Retry the same transfer** (same `Idempotency-Key`) — expect `200 OK` and header `Idempotent-Replayed: true`
+
+```bash
+curl -s -D - -X POST http://localhost:8080/api/v1/transactions \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $IDEM" \
+  -d "{
+    \"description\": \"transfer to pool\",
+    \"legs\": [
+      { \"accountId\": \"$WALLET\", \"amountMinorUnits\": 500, \"direction\": \"CREDIT\" },
+      { \"accountId\": \"$POOL\",   \"amountMinorUnits\": 500, \"direction\": \"DEBIT\"  }
+    ]
+  }" -o /dev/null
+```
+
+On macOS, `uuidgen` produces UUIDs suitable for `Idempotency-Key`. On Linux, use `uuidgen` or any fresh UUID v4 string.
+
+---
+
+## API reference
+
+Base URL: `http://localhost:8080/api/v1`
+
+
+| Method | Path                                       | Idempotency-Key     | Description                        |
+| ------ | ------------------------------------------ | ------------------- | ---------------------------------- |
+| `POST` | `/accounts`                                | No                  | Create account                     |
+| `GET`  | `/accounts`                                | No                  | List all accounts                  |
+| `GET`  | `/accounts/{id}`                           | No                  | Get one account (includes balance) |
+| `POST` | `/transactions`                            | **Required** (UUID) | Post balanced journal entry        |
+| `GET`  | `/transactions/{journalEntryId}`           | No                  | Read entry, legs, metadata         |
+| `POST` | `/transactions/{journalEntryId}/reversals` | **Required** (UUID) | Reverse a posted entry             |
+
+
+**Account types:** `asset`, `liability`, `equity`, `revenue`, `expense`. **Normal balance:** `D` or `C`. **Leg direction:** `DEBIT` or `CREDIT`. All legs in one transaction must share one **currency** and sum to zero.
 
 ---
 
 ## Is the app "complete"?
 
-For **Block 1 (core ledger)**, the app is working when all of these are true:
+The **core ledger** is working when all of these are true:
 
 
-| Check                    | How to verify                                                       |
-| ------------------------ | ------------------------------------------------------------------- |
-| Spring context starts    | `LedgerApplicationTests.contextLoads` passes                        |
-| Database schema is valid | Flyway migrations `V1` + `V2` run without error                   |
-| Posting works            | Integration tests pass (balance updates, zero-sum enforced)         |
-| Reversals work           | `ReversalIntegrationTest` passes                                    |
-| Idempotency works        | 50 concurrent retries → 1 create + 49 replays                       |
-| Concurrency is safe      | 10 parallel withdrawals → exactly 1 rejection, no deadlock          |
-| Unit tests pass          | `AccountTest`, `RequestHasherTest`, validation tests (no Docker)    |
-| API is reachable         | `POST /api/v1/accounts` and `POST /api/v1/transactions` return 201  |
+| Check                    | How to verify                                                      |
+| ------------------------ | ------------------------------------------------------------------ |
+| Spring context starts    | `LedgerApplicationTests.contextLoads` passes                       |
+| Database schema is valid | Flyway migrations `V1` + `V2` run without error                    |
+| Posting works            | Integration tests pass (balance updates, zero-sum enforced)        |
+| Reversals work           | `ReversalIntegrationTest` passes                                   |
+| Idempotency works        | 50 concurrent retries → 1 create + 49 replays                      |
+| Concurrency is safe      | 10 parallel withdrawals → exactly 1 rejection, no deadlock         |
+| Unit tests pass          | `AccountTest`, `RequestHasherTest`, validation tests (no Docker)   |
+| API is reachable         | `POST /api/v1/accounts` and `POST /api/v1/transactions` return 201 |
 
 
-**What is NOT done yet** (see [What's next](#whats-next)): authentication, idempotency TTL, event outbox (Block 2).
+Features **outside this project’s scope** (auth, outbox, idempotency TTL, etc.) are listed under [Limitations](#limitations) — not planned in this repo for now.
 
 ---
 
@@ -421,12 +553,14 @@ Integration tests boot the **real Spring application** against a **real PostgreS
 
 ### Unit tests (no Docker)
 
-| Test class | What it proves |
-| ---------- | -------------- |
-| `AccountTest` | Overdraft limits, frozen account rejection |
-| `RequestHasherTest` | Same body → same hash; key order independence |
+
+| Test class                           | What it proves                                  |
+| ------------------------------------ | ----------------------------------------------- |
+| `AccountTest`                        | Overdraft limits, frozen account rejection      |
+| `RequestHasherTest`                  | Same body → same hash; key order independence   |
 | `LedgerPostingServiceValidationTest` | Unbalanced legs, invalid direction, missing key |
-| `AccountBalanceServiceTest` | Signed-leg balance math per account type |
+| `AccountBalanceServiceTest`          | Signed-leg balance math per account type        |
+
 
 ```bash
 ./mvnw test -Dtest="AccountTest,RequestHasherTest,LedgerPostingServiceValidationTest,AccountBalanceServiceTest"
@@ -448,12 +582,12 @@ Integration tests boot the **real Spring application** against a **real PostgreS
 | **Maven Surefire**   | Runs tests via `./mvnw test`                         |
 
 
-### Test suite (36 tests)
+### Test suite (37 tests)
 
 
 | Test                                                          | Layer   | What it proves                                       |
 | ------------------------------------------------------------- | ------- | ---------------------------------------------------- |
-| `AccountTest` (5)                                             | Unit    | Overdraft / frozen validation                        |
+| `AccountTest` (6)                                             | Unit    | Overdraft / frozen / closed validation               |
 | `RequestHasherTest` (5)                                       | Unit    | Deterministic request fingerprints                   |
 | `LedgerPostingServiceValidationTest` (4)                      | Unit    | Zero-sum and leg validation                          |
 | `AccountBalanceServiceTest` (4)                               | Unit    | Balance math per account type                        |
@@ -463,7 +597,7 @@ Integration tests boot the **real Spring application** against a **real PostgreS
 | `sequentialReplay_returns200WithReplayHeader`                 | HTTP    | Retry returns cached response                        |
 | `concurrentWithdrawals_exhaustBalanceExactlyOneFails`         | Service | 10 threads, balance for 9 → 1 rejection, balance = 0 |
 | `crossAccountTransfers_doNotDeadlock`                         | Service | 40 bidirectional A↔B transfers, no deadlock          |
-| `ReversalIntegrationTest` (6)                                 | HTTP    | Reversal restores balances, idempotency, 409/404     |
+| `ReversalIntegrationTest` (8)                                 | HTTP    | Reversal restores balances, idempotency, 409/404     |
 | `TransactionReadIntegrationTest` (3)                          | HTTP    | GET transaction returns legs + metadata              |
 
 
@@ -605,36 +739,78 @@ Idempotent-Replayed: true
 
 ---
 
-## Limitations
+## What I learned
+
+Building this project was practice in **how fintech platforms keep books in software**, not just CRUD on a `balance` column.
 
 
-| Limitation                          | Detail                                                                                 |
-| ----------------------------------- | -------------------------------------------------------------------------------------- |
-| **Single currency per transaction** | Cross-currency FX not supported                                                        |
-| **Derived balance cost**            | Balance is `SUM(ledger_entries)` — hot accounts can be a read bottleneck at scale      |
-| **No authentication**               | API is open — no auth layer                                                            |
-| **No event outbox**                 | Downstream systems can't subscribe to ledger events yet (Block 2)                        |
-| **Idempotency keys never expire**   | No TTL/cleanup policy                                                                  |
-| **failed_entries table**            | Designed in schema docs but not implemented in code                                    |
+| Topic                          | What the codebase teaches                                                                                                |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| **Double-entry**               | Money moves via **balanced legs**; the DB trigger rejects commits where legs do not sum to zero.                         |
+| **Minor units**                | Store money as `BIGINT` cents — never floating point.                                                                    |
+| **Idempotency (Stripe-style)** | `Idempotency-Key` on POST plus a cached response table — safe retries without double-posting.                            |
+| **Two idempotency layers**     | **API** cache vs **domain** `journal_entries.idempotency_key` — HTTP replay vs business-event dedup.                     |
+| **Concurrency**                | `SELECT … FOR UPDATE` on accounts (sorted order), plus Postgres **advisory locks** on idempotency keys.                  |
+| **Immutability**               | No editing postings; **reversals** create offsetting entries and link to the original.                                   |
+| **Defense in depth**           | Validate in Java *and* enforce in PostgreSQL (triggers, uniqueness).                                                     |
+| **Testing**                    | Unit tests for rules; **Testcontainers** integration tests for real locks, triggers, and HTTP.                           |
+| **System design**              | Ledger as a **separate service** from payments and login — same slot as Modern Treasury / Formance, not Stripe Checkout. |
 
+
+**Outside this repo’s scope:** authentication, multi-tenant isolation, idempotency TTL, event outbox/webhooks — documented as limitations, not follow-up work here.
+
+**Contrast with channel auth (e.g. push approve on a phone):** that pattern proves a **human** on a **device**; this project focuses on **server integrators**, **posting invariants**, and **idempotent money APIs** — the layer behind an app after business approval.
 
 ---
 
-## What's next
+## Limitations
 
-Block 1 polish is largely complete. Recommended next steps:
+This project is a **focused ledger core** for learning and local demos. The items below are **intentional boundaries**, not missing tickets in this repo.
 
-```
-Phase A — Block 1 hardening (remaining)
-  ├── Authentication / API keys
-  ├── Idempotency key TTL + cleanup job
-  └── failed_entries table (optional)
+### Security and operations
 
-Phase B — Block 2 (event layer)
-  ├── Transactional outbox table
-  ├── Publish journal_entry.posted events
-  └── Webhook delivery service
-```
+| Limitation | Detail |
+| ---------- | ------ |
+| **No authentication or authorization** | Every endpoint is public. Anyone who can reach the server can read all accounts and post transactions. |
+| **No multi-tenancy** | There is no `org_id` or tenant isolation. All accounts live in one shared namespace. |
+| **No rate limiting or abuse controls** | No gateway, throttling, or IP allowlists. |
+| **Secrets in config** | Database credentials in `application.properties` / Compose are for local dev only — not a production secret-management story. |
+
+### API surface
+
+| Limitation | Detail |
+| ---------- | ------ |
+| **No account lifecycle API** | Accounts can be `active`, `frozen`, or `closed` in the schema, but there is no HTTP API to freeze, close, or update an account after creation. |
+| **No transaction listing** | You can `GET /transactions/{id}` but not list entries by account, date range, or cursor — no statements or reconciliation export API. |
+| **`GET /accounts` is unpaginated** | Returns every account in the database; does not scale for large catalogs. |
+| **Strict idempotency header** | `Idempotency-Key` must be a **UUID** string (see controller validation). Arbitrary opaque keys like some APIs allow are not supported. |
+
+### Money and accounting
+
+| Limitation | Detail |
+| ---------- | ------ |
+| **Single currency per journal entry** | All legs must share one currency. Cross-currency FX requires explicit clearing accounts — not modeled here (see Flyway `V1` comments). |
+| **Not a payment system** | No cards, ACH, wallets on rails, settlements, or fees as first-class products — only manual double-entry postings. |
+| **Reversals only** | Posted entries are immutable. Corrections are **full reversals**, not partial edits or arbitrary adjustments via API. |
+
+### Data, performance, and reliability
+
+| Limitation | Detail |
+| ---------- | ------ |
+| **Derived balances** | Balances are computed from `ledger_entries` (stored balance column was removed in `V2`). Hot accounts pay read cost on every balance lookup. |
+| **Idempotency keys never expire** | Rows in `idempotency_keys` are kept forever — no TTL or cleanup job; the table grows with every distinct POST key. |
+| **No event outbox or webhooks** | Downstream systems cannot subscribe to posting events from this service. |
+| **No `failed_entries` persistence** | Failed posting attempts are logged (forensic audit) but not stored in a dedicated quarantine table for replay. |
+| **Single Postgres instance** | No replication, sharding, or multi-region story in this repository — one database is the entire backstop. |
+
+### Product and scope
+
+| Limitation | Detail |
+| ---------- | ------ |
+| **Learning / demo scale** | Tested with integration scenarios (concurrency, idempotency, reversals), not load-tested for high QPS or huge history. |
+| **Not a bank or ERP** | No regulatory reporting, AML, end-of-day batch, chart-of-accounts workflows, or general ledger reporting packs. |
+
+For accounting intuition and design tradeoffs, see [UNDERSTANDING.md](./UNDERSTANDING.md). For schema-level rules (triggers, immutability), see `src/main/resources/db/migration/V1__initial_ledger_schema.sql` and `V2__derived_balances_and_immutable_postings.sql`.
 
 ---
 

@@ -28,7 +28,7 @@ public class JournalEntryResponseService {
     @Transactional(readOnly = true)
     public Optional<JournalEntryResponse> findById(UUID journalEntryId) {
         return journalEntryRepository.findById(journalEntryId)
-                .map(this::toResponse);
+                .map(this::toResponse); //if found then call toResponse to convert to JournalEntryResponse
     }
 
     public JournalEntryResponse toResponse(JournalEntry journalEntry) {

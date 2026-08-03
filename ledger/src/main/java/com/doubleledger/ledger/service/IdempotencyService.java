@@ -36,7 +36,7 @@ public class IdempotencyService {
         this.advisoryLockService = advisoryLockService;
     }
 
-    @Transactional
+    @Transactional //lock read and write atomic
     public IdempotentOperationOutcome executePostTransaction(String apiIdempotencyKey,
                                                                String requestHash,
                                                                Supplier<JournalEntry> postingAction) {
@@ -49,7 +49,7 @@ public class IdempotencyService {
                                                                 Supplier<JournalEntry> reversalAction) {
         return executeIdempotent(apiIdempotencyKey, requestHash, reversalAction);
     }
-
+//CORE LOGIC FOR IDEMPOTENCY
     private IdempotentOperationOutcome executeIdempotent(String apiIdempotencyKey,
                                                          String requestHash,
                                                          Supplier<JournalEntry> action) {

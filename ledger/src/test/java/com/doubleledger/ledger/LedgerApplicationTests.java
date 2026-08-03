@@ -9,3 +9,4 @@ class LedgerApplicationTests extends PostgresIntegrationTestSupport {
     void contextLoads() {
     }
 }
+//Spring + Postgres + Flyway wire up correctly

@@ -247,17 +247,17 @@ public class LedgerPostingService {
     }
 
     private void applySignedLegs(UUID journalEntryId, List<SignedLeg> legs) {
-        List<UUID> sortedAccountIds = legs.stream()
-                .map(SignedLeg::accountId)
-                .distinct()
-                .sorted()
-                .collect(Collectors.toList());
+        List<UUID> sortedAccountIds = legs.stream() //get distinct account ids and sort them
+                .map(SignedLeg::accountId) //get account id from SignedLeg
+                .distinct()//remove duplicates
+                .sorted()//sort the account ids
+                .collect(Collectors.toList());//collect the account ids into a list
 
         List<Account> accounts = accountRepository.findAllByIdsForUpdate(sortedAccountIds);
         Map<UUID, Account> accountMap = accounts.stream()
-                .collect(Collectors.toMap(Account::getId, a -> a));
+                .collect(Collectors.toMap(Account::getId, a -> a)); //map account id to account object
 
-        for (UUID id : sortedAccountIds) {
+        for (UUID id : sortedAccountIds) { //if account id is not in the map, throw an error
             if (!accountMap.containsKey(id)) {
                 throw new IllegalArgumentException("Account not found: " + id);
             }

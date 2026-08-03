@@ -44,6 +44,9 @@ public class Account {
         if (status == AccountStatus.frozen) {
             throw new IllegalStateException("Cannot transact on a frozen account");
         }
+        if (status == AccountStatus.closed) {
+            throw new IllegalStateException("Cannot transact on a closed account");
+        }
 
         if (balanceMinorUnits < 0 && !allowOverdraft) {
             throw new IllegalArgumentException("Overdraft not allowed on account: " + id);
@@ -51,6 +54,7 @@ public class Account {
         if (balanceMinorUnits < 0 && Math.abs(balanceMinorUnits) > overdraftLimitMinorUnits) {
             throw new IllegalArgumentException("Overdraft limit exceeded on account: " + id);
         }
+        
     }
 
     public UUID getId() { return id; }

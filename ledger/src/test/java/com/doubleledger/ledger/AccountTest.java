@@ -11,24 +11,29 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-class AccountTest {
+//tis file tests just one function Account.validateBalance(). to ensure that it wont allow overdraft when not allowed or when limit is exceeded or when account is frozen.
+//unit tests
+
+class AccountTest { //no private or public modifiers needed 
 
     private Account account;
 
-    @BeforeEach
+    @BeforeEach //runs before each test
+    //junit creates accounttest object for each test and before each test it calls setUp method
     void setUp() {
-        account = new Account();
-        account.setId(UUID.randomUUID());
-        account.setName("wallet");
-        account.setAccountType(AccountType.asset);
-        account.setNormalBalance("D");
-        account.setCurrency("USD");
-        account.setAllowOverdraft(false);
-        account.setOverdraftLimitMinorUnits(0L);
-        account.setStatus(AccountStatus.active);
+        //default values
+        account = new Account(); //create a new account
+        account.setId(UUID.randomUUID()); //random account id
+        account.setName("wallet"); //account name
+        account.setAccountType(AccountType.asset); //asset account type
+        account.setNormalBalance("D"); //debit balance default
+        account.setCurrency("USD"); //currency default
+        account.setAllowOverdraft(false); //no overdraft allowed default
+        account.setOverdraftLimitMinorUnits(0L); //no overdraft limit default
+        account.setStatus(AccountStatus.active); //account is active default
     }
 
-    @Test
+    @Test //marks the test method
     void validateBalance_allowsZeroOrPositiveBalance() {
         assertThatCode(() -> account.validateBalance(0)).doesNotThrowAnyException();
         assertThatCode(() -> account.validateBalance(10_000)).doesNotThrowAnyException();
@@ -67,4 +72,15 @@ class AccountTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("frozen");
     }
+    
+    @Test
+    void validateBalance_rejectsClosedAccount() {
+        account.setStatus(AccountStatus.closed);
+
+        assertThatThrownBy(() -> account.validateBalance(100))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("closed");
+    }
+
+
 }

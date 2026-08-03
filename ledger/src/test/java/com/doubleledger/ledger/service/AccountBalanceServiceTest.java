@@ -17,7 +17,7 @@ class AccountBalanceServiceTest {
     void setUp() {
         accountBalanceService = new AccountBalanceService(null);
     }
-
+//for asset account debit increases balance, credit decreases balance
     @Test
     void applySignedLeg_assetAccountCreditDecreasesBalance() {
         Account asset = assetAccount();
@@ -26,7 +26,7 @@ class AccountBalanceServiceTest {
 
         assertThat(newBalance).isEqualTo(9_500);
     }
-
+//for liability account credit increases balance, debit decreases balance
     @Test
     void applySignedLeg_liabilityAccountCreditIncreasesBalance() {
         Account liability = liabilityAccount();
@@ -35,7 +35,7 @@ class AccountBalanceServiceTest {
 
         assertThat(newBalance).isEqualTo(500);
     }
-
+// toEconomicBalance changes the sign of the balance for debit normal and for credit normal it doesn't change the sign
     @Test
     void toEconomicBalance_assetUsesDebitNormalConvention() {
         assertThat(AccountBalanceService.toEconomicBalance(AccountType.asset, -500)).isEqualTo(500);
@@ -47,7 +47,7 @@ class AccountBalanceServiceTest {
         assertThat(AccountBalanceService.toEconomicBalance(AccountType.liability, 500)).isEqualTo(500);
         assertThat(AccountBalanceService.toEconomicBalance(AccountType.liability, -500)).isEqualTo(-500);
     }
-
+//helper methods to create asset and liability accounts
     private static Account assetAccount() {
         Account account = new Account();
         account.setId(UUID.randomUUID());
