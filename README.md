@@ -83,6 +83,8 @@ PostgreSQL                          ← triggers, locks, ACID
    **Option B — local Postgres + Maven:**
    Flyway runs migrations automatically on startup. The app listens on **port 8080** by default.
 
+3. **Try the API in the browser** — [Swagger UI](http://localhost:8080/swagger-ui.html) (OpenAPI spec: [http://localhost:8080/api-docs](http://localhost:8080/api-docs)). Use **Try it out** on `POST /api/v1/transactions`; the request body is pre-filled with a balanced two-leg example. For posts and reversals, add header **`Idempotency-Key`** with a fresh UUID (Swagger’s **Authorize** is not required — the API has no auth).
+
 ### Run tests
 
 ```bash
@@ -222,6 +224,16 @@ On macOS, `uuidgen` produces UUIDs suitable for `Idempotency-Key`. On Linux, use
 
 Base URL: `http://localhost:8080/api/v1`
 
+### Swagger / OpenAPI
+
+| Resource | URL |
+| -------- | --- |
+| **Swagger UI** (try endpoints) | [http://localhost:8080/swagger-ui.html](http://localhost:8080/swagger-ui.html) |
+| **OpenAPI 3 JSON** | [http://localhost:8080/api-docs](http://localhost:8080/api-docs) |
+
+Docs are generated at runtime with **[springdoc-openapi](https://springdoc.org/)** (`OpenApiConfig` sets title **DoubleLedger API** and a local server URL). DTOs use `@Schema` descriptions where helpful; `PostTransactionRequest` includes a sample two-leg transfer for **Try it out**.
+
+**Headers in Swagger UI:** for `POST /transactions` and `POST /transactions/{journalEntryId}/reversals`, set **`Idempotency-Key`** to a UUID on each new attempt (reuse the same key only when you intend a replay).
 
 | Method | Path                                       | Idempotency-Key     | Description                        |
 | ------ | ------------------------------------------ | ------------------- | ---------------------------------- |
@@ -633,7 +645,7 @@ cd ledger
 docker compose up --build
 ```
 
-App: `http://localhost:8080` · Postgres: `localhost:5433`
+App: `http://localhost:8080` · Swagger: [http://localhost:8080/swagger-ui.html](http://localhost:8080/swagger-ui.html) · Postgres: `localhost:5433`
 
 ### Docker for integration tests
 
@@ -828,6 +840,7 @@ For accounting intuition and design tradeoffs, see [UNDERSTANDING.md](./UNDERSTA
 | JPA / Hibernate  | ORM                                         |
 | Testcontainers   | Integration test database                   |
 | Jackson 2        | JSON serialization (`spring-boot-jackson2`) |
+| springdoc-openapi | Swagger UI + OpenAPI 3 (`/swagger-ui.html`, `/api-docs`) |
 | Logstash encoder | Structured ECS logging                      |
 
 
