@@ -15,7 +15,7 @@ public interface LedgerEntryRepository extends JpaRepository<LedgerEntry, UUID> 
 
     List<LedgerEntry> findByJournalEntryIdOrderByCreatedAtAsc(UUID journalEntryId);
 
-    @Query("SELECT s(SUM(le.amountMinorUnits), 0) FROM LedgerEntry le WHERE le.accountId = :accountId")
+    @Query("SELECT COALESCE(SUM(le.amountMinorUnits), 0) FROM LedgerEntry le WHERE le.accountId = :accountId")
     long sumSignedAmountMinorUnitsByAccountId(@Param("accountId") UUID accountId);
 
     @Query("""
