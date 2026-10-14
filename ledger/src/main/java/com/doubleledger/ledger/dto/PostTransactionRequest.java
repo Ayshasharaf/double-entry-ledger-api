@@ -2,6 +2,8 @@ package com.doubleledger.ledger.dto;
 
 import io.swagger.v3.oas.annotations.media.ArraySchema;
 import io.swagger.v3.oas.annotations.media.Schema;
+import com.doubleledger.ledger.model.JournalEntryStatus;
+
 
 import java.util.List;
 import java.util.Map;
@@ -35,6 +37,11 @@ public class PostTransactionRequest {
 
     // A description of the transfer (e.g., "Subscription payment for invoice_923")
     private String description;
+
+    // The status of the journal entry
+    private JournalEntryStatus status;
+    public JournalEntryStatus getStatus() { return status; }
+    public void setStatus(JournalEntryStatus status) { this.status = status; }
 
     // The individual splits of this transaction. They must sum to zero!
     @ArraySchema(

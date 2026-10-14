@@ -25,7 +25,7 @@ public record JournalEntryResponse(
                 journalEntry.getStatus().name(),
                 journalEntry.getReversesJournalEntryId(),
                 journalEntry.getMetadata(),
-                journalEntry.getPostedAt().toInstant(),
+                journalEntry.getPostedAt() == null ? null : journalEntry.getPostedAt().toInstant(),
                 entries
         );
     }

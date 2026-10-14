@@ -32,7 +32,7 @@ public class JournalEntry {
     @Column(columnDefinition = "jsonb")
     private Map<String, Object> metadata;
 
-    @Column(name = "posted_at", nullable = false)
+    @Column(name = "posted_at", nullable = true)
     private OffsetDateTime postedAt = OffsetDateTime.now();
 
     @Column(name = "created_at", nullable = false, updatable = false)

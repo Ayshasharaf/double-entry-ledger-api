@@ -210,9 +210,19 @@ public class LedgerPostingService {
         journalEntry.setId(journalId);
         journalEntry.setIdempotencyKey(request.getIdempotencyKey());
         journalEntry.setDescription(request.getDescription());
-        journalEntry.setStatus(JournalEntryStatus.posted);
+        JournalEntryStatus status = request.getStatus() == null
+        ? JournalEntryStatus.posted
+        : request.getStatus();
+            if (status != JournalEntryStatus.pending && status != JournalEntryStatus.posted) {
+                throw new IllegalArgumentException("A new journal must be pending or posted.");
+            }
+        journalEntry.setStatus(status);
         journalEntry.setMetadata(request.getMetadata());
-        journalEntry.setPostedAt(OffsetDateTime.now());
+        if (status == JournalEntryStatus.posted) {
+            journalEntry.setPostedAt(OffsetDateTime.now());
+        } else {
+            journalEntry.setPostedAt(null);
+        }
         journalEntry = journalEntryRepository.save(journalEntry);
 
         applySignedLegs(journalId, signedLegs);
