@@ -1,4 +1,4 @@
-[![CI](https://github.com/Ayshasharaf/double-entry-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/Ayshasharaf/double-entry-ledger/actions/workflows/ci.yml)
+[![CI](https://github.com/Ayshasharaf/double-entry-ledger-api/actions/workflows/ci.yml/badge.svg)](https://github.com/Ayshasharaf/double-entry-ledger-api/actions/workflows/ci.yml)
 
 # DoubleLedger — ledger-core
 
@@ -6,26 +6,26 @@ A **double-entry financial ledger** built with **Java 21**, **Spring Boot 4**, a
 
 Money never appears or disappears — it only moves. Every transaction is recorded as balanced legs (debits = credits), stored atomically, and protected against duplicate requests and concurrent race conditions.
 
-This repository is a **complete, self-contained ledger service** for learning and demos: posting, reversals, idempotency, and concurrency control. It is intentionally **not** a full production platform (see [Limitations](#limitations)).
+This repository is a learning and demo project with a double-entry ledger core and a wallet top-up feature. The ledger supports posting, reversals, idempotency, and concurrency controls. Wallet top-ups use a fake payment provider and post to the ledger. It is intentionally **not** a production payment platform (see [Limitations](#limitations)).
 
 ---
 
 ## What this project is
 
-**DoubleLedger** is a **ledger API**: create accounts, post **balanced multi-leg journal entries**, read balances and history, and **reverse** mistakes — over HTTP with PostgreSQL as the source of truth.
+**DoubleLedger** is a **ledger API with a wallet product layer**: create accounts, post **balanced multi-leg journal entries**, read balances and transactions, reverse postings, and demonstrate user wallet top-ups through a fake provider. PostgreSQL is the source of truth for balances and transaction history.
 
 It is **not** a payment processor (Stripe) or a full bank core. It sits in the same category as the **ledger layer** in products like **[Modern Treasury](https://www.moderntreasury.com/)** and **[Formance Ledger](https://docs.formance.com/modules/ledger)** — the service that owns **double-entry books** while payments, login, and cards live elsewhere.
 
 ```
-Your app / payment service          ← optional, not in this repo
-        │  POST /api/v1/transactions + Idempotency-Key
+Client
+  │  Ledger API or wallet top-up API
         ▼
-DoubleLedger (this repo)            ← accounts, postings, reversals, idempotency
+DoubleLedger (one Spring Boot app)   ← ledger core + wallet/top-up workflow
         ▼
-PostgreSQL                          ← triggers, locks, ACID
+PostgreSQL                          ← journals, entries, wallets, top-ups
 ```
 
-**Who uses it:** backend developers calling the REST API locally or via Docker. The API is **open** (no auth) — fine for learning; do not expose it on the public internet as-is.
+**Who uses it:** backend developers exploring ledger and wallet design through a local REST API or Docker. The ledger API is unauthenticated. The wallet demo trusts `X-User-Id`; this is not production authentication. Do not expose the app publicly as-is.
 
 **Related docs in this repo:** [UNDERSTANDING.md](./UNDERSTANDING.md) (accounting intuition), [CODEBASE_LEARNING.md](./CODEBASE_LEARNING.md) (guided study), [ARCHITECTURE_TEACHING_GUIDE.md](./ARCHITECTURE_TEACHING_GUIDE.md) (layer-by-layer tour).
 
@@ -38,19 +38,20 @@ PostgreSQL                          ← triggers, locks, ACID
 3. [Walkthrough — first transfer end-to-end](#walkthrough--first-transfer-end-to-end)
 4. [API reference](#api-reference)
 5. [Is the app "complete"?](#is-the-app-complete)
-6. [Architecture overview](#architecture-overview)
-7. [Code map](#code-map)
-8. [Data flow — start to finish](#data-flow--start-to-finish)
-9. [Database design](#database-design)
-10. [Rules & principles](#rules--principles)
-11. [Testing](#testing)
-12. [Docker — what it does here](#docker--what-it-does-here)
-13. [CI](#ci)
-14. [API examples](#api-examples)
-15. [What I learned](#what-i-learned)
-16. [Limitations](#limitations)
-17. [Tech stack](#tech-stack)
-18. [Further reading](#further-reading)
+6. [Implementation roadmap](#implementation-roadmap)
+7. [Architecture overview](#architecture-overview)
+8. [Code map](#code-map)
+9. [Data flow — start to finish](#data-flow--start-to-finish)
+10. [Database design](#database-design)
+11. [Rules & principles](#rules--principles)
+12. [Testing](#testing)
+13. [Docker — what it does here](#docker--what-it-does-here)
+14. [CI and CD](#ci-and-cd)
+15. [API examples](#api-examples)
+16. [What I learned](#what-i-learned)
+17. [Limitations](#limitations)
+18. [Tech stack](#tech-stack)
+19. [Further reading](#further-reading)
 
 ---
 
@@ -71,21 +72,19 @@ PostgreSQL                          ← triggers, locks, ACID
 
 ### Run the app
 
-1. Start PostgreSQL with a database matching `application.properties`:
-  ```
-   Host:     localhost:5433
-   Database: ledger_db
-   User:     ledger_admin
-   Password: ledger1234
-  ```
-2. Start Spring Boot (pick one):
-  **Option A — Docker Compose (recommended):**
-   **Option B — local Postgres + Maven:**
-   Flyway runs migrations automatically on startup. The app listens on **port 8080** by default.
+From the repository root, start the app and PostgreSQL together:
 
-3. **Try the API in the browser** — [Swagger UI](http://localhost:8080/swagger-ui.html) (OpenAPI spec: [http://localhost:8080/api-docs](http://localhost:8080/api-docs)). Use **Try it out** on `POST /api/v1/transactions`; the request body is pre-filled with a balanced two-leg example. For posts and reversals, add header **`Idempotency-Key`** with a fresh UUID (Swagger’s **Authorize** is not required — the API has no auth).
+```bash
+docker compose up --build
+```
+
+The API listens on port `8080`; PostgreSQL is exposed on `5433`. Flyway applies migrations at startup. To use local PostgreSQL instead, start a database matching `ledger/src/main/resources/application.properties`, then run `cd ledger && ./mvnw spring-boot:run`.
+
+Try the API using [Swagger UI](http://localhost:8080/swagger-ui.html) or the [OpenAPI document](http://localhost:8080/api-docs). Ledger posting and reversal requests require an `Idempotency-Key` header. The wallet top-up demo additionally requires `X-User-Id`.
 
 ### Run tests
+
+Run these Maven commands from the `ledger/` directory:
 
 ```bash
 # All tests
@@ -102,23 +101,26 @@ PostgreSQL                          ← triggers, locks, ACID
 
 # One test method
 ./mvnw test -Dtest=IdempotencyIntegrationTest#sequentialReplay_returns200WithReplayHeader
+
+# Top-up integration tests
+./mvnw -Dtest=TopupIntegrationTest test
 ```
 
 **Expected result when healthy:**
 
 ```
-Tests run: 37, Failures: 0, Errors: 0, Skipped: 0
+Tests run: 45, Failures: 0, Errors: 0, Skipped: 0
 BUILD SUCCESS
 ```
 
-- **Unit tests** (19 tests) run without Docker.
-- **Integration tests** (18 tests) need **Docker Desktop running** (Testcontainers), or local Postgres on `localhost:5433` with `-Dtest.useLocalPostgres=true`.
+- The current suite has **45 tests**; the verified run completed with 0 failures and 0 errors.
+- Integration tests use Testcontainers when Docker is available. Alternatively, use local PostgreSQL on `localhost:5433` with `-Dtest.useLocalPostgres=true`.
 
 ---
 
 ## Walkthrough — first transfer end-to-end
 
-With the app running (`docker compose up --build` or `./mvnw spring-boot:run` + Postgres on port **5433**), run these steps. Amounts are **minor units** (500 = $5.00 USD).
+With the app running (`docker compose up --build` or `cd ledger && ./mvnw spring-boot:run` + Postgres on port **5433**), run these steps. Amounts are **minor units** (500 = $5.00 USD). This ledger-only example creates an asset account; it is not the product `Wallet` row used by the M1 top-up endpoint. The seeded M1 wallet maps to a credit-normal liability account.
 
 **1. Create a wallet (asset account)**
 
@@ -243,30 +245,71 @@ Docs are generated at runtime with **[springdoc-openapi](https://springdoc.org/)
 | `POST` | `/transactions`                            | **Required** (UUID) | Post balanced journal entry        |
 | `GET`  | `/transactions/{journalEntryId}`           | No                  | Read entry, legs, metadata         |
 | `POST` | `/transactions/{journalEntryId}/reversals` | **Required** (UUID) | Reverse a posted entry             |
+| `POST` | `/wallets/{walletId}/topups`                | **Required**        | Demo top-up using the fake provider |
 
 
 **Account types:** `asset`, `liability`, `equity`, `revenue`, `expense`. **Normal balance:** `D` or `C`. **Leg direction:** `DEBIT` or `CREDIT`. All legs in one transaction must share one **currency** and sum to zero.
+
+### Wallet top-up API
+
+The current endpoint is `POST /api/v1/wallets/{walletId}/topups`. It expects `X-User-Id`, `Idempotency-Key`, and a positive `amountMinorUnits` JSON field. The seeded demo wallet belongs to `demo-user`. Amounts are USD minor units: `500` means `$5.00`.
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/wallets/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb1/topups \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: demo-user" \
+  -H "Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000" \
+  -d '{"amountMinorUnits":500}'
+```
+
+The fake provider declines amount `999999` to exercise the `FAILED` path. This is the current implementation contract; the project checklist still describes a different route/body shape, so reconcile those before treating the endpoint contract as final.
 
 ---
 
 ## Is the app "complete"?
 
-The **core ledger** is working when all of these are true:
+The ledger core and wallet demo have separate completion scopes. The current full suite passes, but M1 still has work before the wallet milestone is complete.
 
 
 | Check                    | How to verify                                                      |
 | ------------------------ | ------------------------------------------------------------------ |
 | Spring context starts    | `LedgerApplicationTests.contextLoads` passes                       |
-| Database schema is valid | Flyway migrations `V1` + `V2` run without error                    |
+| Database schema is valid | Flyway migrations `V1` through `V4` run without error              |
 | Posting works            | Integration tests pass (balance updates, zero-sum enforced)        |
 | Reversals work           | `ReversalIntegrationTest` passes                                   |
 | Idempotency works        | 50 concurrent retries → 1 create + 49 replays                      |
 | Concurrency is safe      | 10 parallel withdrawals → exactly 1 rejection, no deadlock         |
 | Unit tests pass          | `AccountTest`, `RequestHasherTest`, validation tests (no Docker)   |
 | API is reachable         | `POST /api/v1/accounts` and `POST /api/v1/transactions` return 201 |
+| Top-up behavior          | `TopupIntegrationTest` passes (7 API/database integration tests)   |
 
 
 Features **outside this project’s scope** (auth, outbox, idempotency TTL, etc.) are listed under [Limitations](#limitations) — not planned in this repo for now.
+
+---
+
+## Implementation roadmap
+
+The work stays in one Spring Boot application. The ledger owns accounting records; the wallet package owns user-facing wallet workflows and calls the ledger service for postings.
+
+| Phase | Scope | Status / exit criteria |
+| --- | --- | --- |
+| Ledger core | Accounts, balanced journals, derived balances, idempotency, concurrency, reversals | Implemented; current full suite passes 45 tests |
+| M1: Wallet top-up | Seeded USD wallet, fake provider, owner check, top-up states, ledger posting | Implemented and covered by 7 integration tests; finalize the API contract and add in-flight/concurrent retry coverage before calling M1 done |
+| M2: P2P transfer | Transfer between owned wallets; reject self-transfer and insufficient funds | Planned after M1 is closed |
+| M3: Withdrawal | Fake payout flow and clearing-account ledger posting | Planned after M2 |
+| M4: Demo polish | Read current user's wallet and derived balance; OpenAPI examples; run guide | Planned |
+| Payment intent | Deterministic intent state machine with confirmation and step-up; chat adapter later | Future phase; an LLM must never post directly to the ledger |
+
+### M1 completion checklist
+
+- [ ] Choose one top-up route/body contract and align controller, checklist, and README.
+- [ ] Prove a matching request during `PROCESSING` cannot cause a second effective provider charge or duplicate journal.
+- [ ] Ensure a real provider adapter honors the same idempotency key across retries; the fake provider does not model persistent charge deduplication.
+- [x] Verify success, replay, mismatch, decline, wrong owner, missing wallet, and invalid amount paths.
+- [x] Run all 45 tests successfully.
+
+See [`checklist.md`](checklist.md) for the detailed milestones and [`docs/phase-0-payment-intent.md`](docs/phase-0-payment-intent.md) for the later payment-intent product contract.
 
 ---
 
@@ -281,17 +324,22 @@ Features **outside this project’s scope** (auth, outbox, idempotency TTL, etc.
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  controller/                                                     │
-│  LedgerController          GlobalExceptionHandler                │
+│  LedgerController · TopupController · GlobalExceptionHandler     │
 └────────────────────────────┬────────────────────────────────────┘
                              │
               ┌──────────────┼──────────────┐
               ▼              ▼              ▼
 ┌──────────────────┐ ┌─────────────┐ ┌──────────────────┐
-│ IdempotencyService│ │RequestHasher│ │LedgerPostingService│
-│ (API-layer cache) │ │ (SHA-256)   │ │ (core engine)     │
+│ IdempotencyService│ │RequestHasher│ │TopupService      │
+│ (ledger API cache)│ │ (SHA-256)   │ │PaymentProvider   │
 └────────┬─────────┘ └─────────────┘ └────────┬─────────┘
          │                                     │
-         └──────────────┬──────────────────────┘
+         └──────────────┼──────────────────────┘
+                        ▼
+              ┌──────────────────┐
+              │LedgerPostingService│
+              │ (accounting core)│
+              └────────┬─────────┘
                         ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  repository/          JPA + Hibernate                            │
@@ -312,7 +360,9 @@ Features **outside this project’s scope** (auth, outbox, idempotency TTL, etc.
 
 | Layer                    | Responsibility                                              |
 | ------------------------ | ----------------------------------------------------------- |
-| **Controller**           | HTTP in/out, validation, idempotency header parsing         |
+| **Controller**           | HTTP in/out, request validation, header/path extraction     |
+| **TopupService**         | Wallet ownership, idempotency, provider/ledger coordination  |
+| **PaymentProvider**      | Charge abstraction; fake implementation for the demo        |
 | **IdempotencyService**   | API-layer dedup — replay cached HTTP responses on retry     |
 | **LedgerPostingService** | Domain logic — lock accounts, apply legs, update balances   |
 | **Account (entity)**     | Debit/credit rules per account type, overdraft checks       |
@@ -370,11 +420,21 @@ ledger/
 │   └── config/
 │       └── AsyncConfig.java
 │
+├── src/main/java/com/doubleledger/wallet/
+│   ├── controller/TopupController.java       ← Top-up HTTP endpoint
+│   ├── dto/                                   ← Top-up request/response
+│   ├── model/                                 ← Wallet, Topup, TopupStatus
+│   ├── provider/                              ← PaymentProvider + fake provider
+│   ├── repository/                            ← Wallet and top-up persistence
+│   └── service/TopupService.java              ← Top-up orchestration
+│
 ├── src/main/resources/
 │   ├── application.properties          ← DB connection, Flyway, logging
 │   └── db/migration/
 │       ├── V1__initial_ledger_schema.sql
-│       └── V2__derived_balances_and_immutable_postings.sql
+│       ├── V2__derived_balances_and_immutable_postings.sql
+│       ├── V3__pending_and_voided.sql
+│       └── V4__wallets_and_topups.sql
 │
 ├── docker-compose.yml                  ← app + Postgres, one command
 ├── Dockerfile
@@ -390,8 +450,10 @@ ledger/
     ├── LedgerApplicationTests.java              ← smoke test
     ├── IdempotencyIntegrationTest.java          ← HTTP idempotency (3 tests)
     ├── LedgerPostingConcurrencyIntegrationTest.java ← locking (2 tests)
-    ├── ReversalIntegrationTest.java             ← reversals (6 tests)
-    └── TransactionReadIntegrationTest.java      ← GET + metadata (3 tests)
+    ├── PendingJournalIntegrationTest.java       ← pending journals (1 test)
+    ├── ReversalIntegrationTest.java             ← reversals (9 tests)
+    ├── TransactionReadIntegrationTest.java      ← GET + metadata (3 tests)
+    └── TopupIntegrationTest.java                ← wallet top-ups (7 tests)
 ```
 
 ---
@@ -495,11 +557,24 @@ erDiagram
         bigint balance_after
     }
     accounts {
-        uuid id PK
-        string account_type
-        string currency
-        bigint balance_minor_units
-        boolean allow_overdraft
+      uuid id PK
+      string account_type
+      string currency
+      boolean allow_overdraft
+    }
+    wallets {
+      uuid id PK
+      string user_id
+      uuid ledger_account_id FK
+      string currency
+    }
+    topups {
+      uuid id PK
+      uuid wallet_id FK
+      bigint amount_minor_units
+      string status
+      string idempotency_key UK
+      uuid journal_entry_id FK
     }
     idempotency_keys {
         text idempotency_key PK
@@ -596,7 +671,7 @@ Integration tests boot the **real Spring application** against a **real PostgreS
 | **Maven Surefire**   | Runs tests via `./mvnw test`                         |
 
 
-### Test suite (37 tests)
+### Test suite (45 tests)
 
 
 | Test                                                          | Layer   | What it proves                                       |
@@ -611,8 +686,10 @@ Integration tests boot the **real Spring application** against a **real PostgreS
 | `sequentialReplay_returns200WithReplayHeader`                 | HTTP    | Retry returns cached response                        |
 | `concurrentWithdrawals_exhaustBalanceExactlyOneFails`         | Service | 10 threads, balance for 9 → 1 rejection, balance = 0 |
 | `crossAccountTransfers_doNotDeadlock`                         | Service | 40 bidirectional A↔B transfers, no deadlock          |
-| `ReversalIntegrationTest` (8)                                 | HTTP    | Reversal restores balances, idempotency, 409/404     |
+| `PendingJournalIntegrationTest` (1)                            | HTTP    | Pending journal lifecycle                            |
+| `ReversalIntegrationTest` (9)                                  | HTTP    | Reversal restores balances, idempotency, 409/404     |
 | `TransactionReadIntegrationTest` (3)                          | HTTP    | GET transaction returns legs + metadata              |
+| `TopupIntegrationTest` (7)                                    | HTTP    | Top-up success/replay/failure/ownership/validation    |
 
 
 ### How tests get a database
@@ -658,7 +735,7 @@ App: `http://localhost:8080` · Swagger: [http://localhost:8080/swagger-ui.html]
 │       │                      (ephemeral, destroyed after) │
 │       ▼                                                   │
 │  Spring Boot test context connects to that Postgres       │
-│  Flyway runs V1 + V2 migrations                           │
+│  Flyway runs V1 through V4 migrations                     │
 │  Tests run against real schema + real locks + real triggers│
 └──────────────────────────────────────────────────────────┘
 ```
@@ -677,15 +754,17 @@ App: `http://localhost:8080` · Swagger: [http://localhost:8080/swagger-ui.html]
 
 ---
 
-## CI
+## CI and CD
 
-GitHub Actions runs `./mvnw clean test` on every push/PR to `main`:
+GitHub Actions runs `./mvnw clean test` on pushes to `main` or `feature/**` branches and on pull requests targeting `main`:
 
 ```
 .github/workflows/ci.yml
 ```
 
-Requires Docker on the runner (provided by `ubuntu-latest`) for Testcontainers.
+The workflow uses Java 21 and `ubuntu-latest`; Docker is available there for the Testcontainers PostgreSQL integration tests. Feature branch pushes are checked before a pull request is opened.
+
+**There is no CD/deployment workflow yet.** The current pipeline verifies the code; it does not publish an image or deploy the service. A sensible next step is to add deployment only after choosing a target (for example, a container registry plus a demo host), storing credentials as GitHub Actions secrets, and defining a staging/production approval policy. Do not describe the current Actions setup as continuous deployment.
 
 ---
 
@@ -768,10 +847,10 @@ Building this project was practice in **how fintech platforms keep books in soft
 | **Immutability**               | No editing postings; **reversals** create offsetting entries and link to the original.                                   |
 | **Defense in depth**           | Validate in Java *and* enforce in PostgreSQL (triggers, uniqueness).                                                     |
 | **Testing**                    | Unit tests for rules; **Testcontainers** integration tests for real locks, triggers, and HTTP.                           |
-| **System design**              | Ledger as a **separate service** from payments and login — same slot as Modern Treasury / Formance, not Stripe Checkout. |
+| **System design**              | Ledger is the accounting core; wallet/payment orchestration is a separate module in this app, not a separate deployable service. |
 
 
-**Outside this repo’s scope:** authentication, multi-tenant isolation, idempotency TTL, event outbox/webhooks — documented as limitations, not follow-up work here.
+**Outside the current demo scope:** production authentication, multi-tenant isolation, idempotency TTL, and event outbox/webhooks. The wallet and transfer implementation plan is listed above.
 
 **Contrast with channel auth (e.g. push approve on a phone):** that pattern proves a **human** on a **device**; this project focuses on **server integrators**, **posting invariants**, and **idempotent money APIs** — the layer behind an app after business approval.
 
@@ -779,7 +858,7 @@ Building this project was practice in **how fintech platforms keep books in soft
 
 ## Limitations
 
-This project is a **focused ledger core** for learning and local demos. The items below are **intentional boundaries**, not missing tickets in this repo.
+This project is a **ledger core plus a wallet top-up demo** for learning and local use. Most items below are **intentional boundaries**. A few are **known integrity / API gaps** called out so they are not mistaken for production guarantees.
 
 ### Security and operations
 
@@ -789,6 +868,7 @@ This project is a **focused ledger core** for learning and local demos. The item
 | **No multi-tenancy** | There is no `org_id` or tenant isolation. All accounts live in one shared namespace. |
 | **No rate limiting or abuse controls** | No gateway, throttling, or IP allowlists. |
 | **Secrets in config** | Database credentials in `application.properties` / Compose are for local dev only — not a production secret-management story. |
+| **No durable actor audit trail** | Successful posts/reversals are not written to a separate who/when/why audit table. Forensic logging covers unexpected failures only (async logs), not compliance-grade audit. |
 
 ### API surface
 
@@ -798,24 +878,36 @@ This project is a **focused ledger core** for learning and local demos. The item
 | **No transaction listing** | You can `GET /transactions/{id}` but not list entries by account, date range, or cursor — no statements or reconciliation export API. |
 | **`GET /accounts` is unpaginated** | Returns every account in the database; does not scale for large catalogs. |
 | **Strict idempotency header** | `Idempotency-Key` must be a **UUID** string (see controller validation). Arbitrary opaque keys like some APIs allow are not supported. |
+| **Weak Bean Validation on post DTOs** | `@Valid` is present, but posting legs/description have little declarative validation. Bad payloads often fail later in service/DB rather than as clean 400 field errors. |
+| **Frozen/closed accounts return 500** | `Account.validateBalance` throws `IllegalStateException`, which maps to a generic internal error — clients cannot tell “not transactable” from infrastructure failure. |
+| **Error bodies lack stable codes** | Insufficient funds, missing account, and unbalanced legs are mostly free-text `400` messages. Clients must parse strings; there is no machine-readable `errorCode` for retry vs fix-input. |
 
 ### Money and accounting
 
 | Limitation | Detail |
 | ---------- | ------ |
 | **Single currency per journal entry** | All legs must share one currency. Cross-currency FX requires explicit clearing accounts — not modeled here (see Flyway `V1` comments). |
+| **Currency is length-checked, not ISO-validated** | Account create accepts any 3-letter string (e.g. `ZZZ`); it is not checked against ISO 4217. |
 | **Not a payment system** | No cards, ACH, wallets on rails, settlements, or fees as first-class products — only manual double-entry postings. |
 | **Reversals only** | Posted entries are immutable. Corrections are **full reversals**, not partial edits or arbitrary adjustments via API. |
+| **One-reversal invariant is app-enforced** | Concurrent double-reversal is blocked by advisory locks + service checks, but there is **no** partial `UNIQUE` index on `reverses_journal_entry_id`. A bypass (bug / raw SQL) can post two reversals. |
+| **Leg amounts not enforced positive at the API** | Docs say amounts are unsigned minor units, but negative values are not rejected. A negative amount can invert debit/credit while still zero-summing. |
+| **Empty journal bypasses zero-sum trigger** | The deferred balance trigger runs on `ledger_entries` inserts. A journal header with **zero legs** never fires it (app requires ≥2 legs; raw SQL could still create an empty header). |
+| **Journal status transitions unrestricted** | Immutability triggers allow updating `status` to any value, including un-reversing (`reversed → posted`), without changing legs. |
+| **`normal_balance` not tied to `account_type`** | Contradictory pairs can be stored; balance math uses account type only and ignores `normal_balance`. |
 
 ### Data, performance, and reliability
 
 | Limitation | Detail |
 | ---------- | ------ |
 | **Derived balances** | Balances are computed from `ledger_entries` (stored balance column was removed in `V2`). Hot accounts pay read cost on every balance lookup. |
+| **SUM under row locks on write** | Posting locks accounts with `SELECT … FOR UPDATE`, then recomputes `SUM(ledger_entries)` for each. Correct under concurrency, but hot accounts serialize and slow as history grows — no materialized balance tip. |
 | **Idempotency keys never expire** | Rows in `idempotency_keys` are kept forever — no TTL or cleanup job; the table grows with every distinct POST key. |
+| **Postgres unique-violation “replay” catch is fragile** | Catching `DataIntegrityViolationException` and re-querying in the **same** transaction is unreliable after Postgres aborts the TX. Advisory locks usually avoid the race; the catch path is not a true safety net. |
 | **No event outbox or webhooks** | Downstream systems cannot subscribe to posting events from this service. |
 | **No `failed_entries` persistence** | Failed posting attempts are logged (forensic audit) but not stored in a dedicated quarantine table for replay. |
 | **Single Postgres instance** | No replication, sharding, or multi-region story in this repository — one database is the entire backstop. |
+| **Isolation level not explicit** | The service relies on Postgres/Spring defaults (`READ COMMITTED`) plus pessimistic/advisory locks; isolation is not stated in config. |
 
 ### Product and scope
 
