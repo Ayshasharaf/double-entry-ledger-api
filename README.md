@@ -1,74 +1,119 @@
-# DoubleLedger
+# Double Entry Ledger API
 
-A learning project: a Java 21 and Spring Boot API for double-entry accounting, backed by PostgreSQL. It supports balanced journal entries, reversals, idempotent requests, and a demo wallet top-up workflow.
+[![CI](https://github.com/Ayshasharaf/double-entry-ledger-api/actions/workflows/ci.yml/badge.svg)](https://github.com/Ayshasharaf/double-entry-ledger-api/actions/workflows/ci.yml)
 
-> **Scope:** This is a local learning project, not a production payment processor or banking system. It has no authentication or tenant isolation.
+A Java 21 and Spring Boot API for learning and experimenting with double-entry accounting. The application records balanced, immutable journal postings in PostgreSQL, supports reversals and idempotent requests, and demonstrates a wallet top-up workflow with a fake payment provider.
 
-## What it demonstrates
+> **Project scope:** This is a local learning project, not a production payment processor or banking system. It does not include authentication, tenant isolation, real payment processing, or deployment automation.
 
-- Balanced, multi-leg ledger transactions
-- Derived account balances and immutable postings
-- Transaction reversals instead of editing history
-- Idempotent requests using SHA-256 request hashing
-- PostgreSQL advisory locks and account locking for concurrency
-- Flyway migrations and PostgreSQL integration tests
-- A demo wallet top-up flow using a fake payment provider
+## Key features
+
+- Balanced journal entries with multiple debit and credit legs
+- Immutable postings and derived account balances
+- Reversals that add correction entries instead of changing history
+- Idempotency through SHA-256 request hashing and `Idempotency-Key`
+- PostgreSQL advisory locks and database constraints for concurrency and integrity
+- Flyway schema migrations
+- PostgreSQL integration tests with Testcontainers
+- Demo wallet top-up orchestration using a fake provider
+- Swagger/OpenAPI documentation
+
+## Technology
+
+- Java 21
+- Spring Boot 4
+- Spring Data JPA
+- PostgreSQL 16
+- Flyway
+- Maven
+- Docker and Docker Compose
+- Testcontainers
+- SpringDoc OpenAPI
 
 ## Run locally
 
-**Requirements:** Java 21+, Docker, and Docker Compose.
+### Prerequisites
+
+- Docker with Docker Compose
+- Java 21 and Maven only if you want to run the application or tests outside Docker
+
+### Start the API and PostgreSQL
+
+From the repository root:
 
 ```bash
+cd ledger
 docker compose up --build
 ```
 
-When the application starts, open [Swagger UI](http://localhost:8080/swagger-ui.html) to explore the API.
+The API will be available at `http://localhost:8080`, and Swagger UI will be available at:
 
-> Confirm the Compose file’s location and keep this as the single, correct startup command. The current README gives both a repository-root command and a `cd ledger` command.
+- `http://localhost:8080/swagger-ui.html`
+- OpenAPI JSON: `http://localhost:8080/api-docs`
+
+PostgreSQL is published on host port `5433`.
+
+To stop the services:
+
+```bash
+docker compose down
+```
+
+To stop the services and delete the local database volume:
+
+```bash
+docker compose down -v
+```
 
 ## Example workflow
 
 1. Create two accounts.
-2. Post a balanced transaction with an `Idempotency-Key`.
-3. Read the resulting balances.
-4. Retry the request with the same key to see the idempotent replay.
-5. Reverse a posted transaction.
+2. Post a balanced transaction with an `Idempotency-Key` header.
+3. Read the resulting account balances.
+4. Retry the same request with the same key to verify the idempotent replay.
+5. Reverse the posted transaction.
 
-Amounts are integers in minor units—for example, `500` means `$5.00` USD. The first successful posting returns `201 Created`; an exact retry returns `200 OK`.
+Amounts are integer values in minor units. For example, `500` represents $5.00 in USD if USD is used by the caller as a two-decimal currency. The first successful posting returns `201 Created`; an exact retry returns `200 OK`.
 
 ## Architecture
 
-The project is one Spring Boot application with two parts:
+The application is organized around two areas:
 
-- **Ledger core:** accounts, journal entries, posting, balances, reversals, and idempotency.
-- **Wallet demo:** wallet ownership checks and top-up orchestration through a fake provider.
+- **Ledger core** — accounts, journal entries, postings, balances, reversals, and idempotency
+- **Wallet demo** — wallet ownership checks and top-up orchestration through a fake payment provider
 
-PostgreSQL stores the ledger and wallet data. Flyway manages schema migrations, and database constraints provide a backstop for important accounting invariants.
+PostgreSQL stores all ledger and wallet state. Flyway manages schema changes, JPA handles persistence, and database constraints provide a final backstop for accounting invariants.
+
+For the design background and implementation phases, see [Phase 0: Payment Intent](./docs/phase-0-payment-intent.md).
 
 ## Tests
 
-Run the test suite from the directory containing `mvnw`:
+Run the Maven test suite from the application directory:
 
 ```bash
+cd ledger
 ./mvnw clean test
 ```
 
-Integration tests use Testcontainers and require Docker. Update this section with the current verified test result; avoid keeping a hardcoded test count unless you recheck it regularly.
+The integration tests use Testcontainers and therefore require Docker.
 
-## GitHub Actions: CI and image delivery
+## CI
 
-The workflow in `.github/workflows/ci.yml` runs the Maven test suite on pushes to `main` and `feature/**`, and on pull requests targeting `main`. It provides continuous integration (CI) only; it does not build/publish a release image or deploy the application. Deployment can be added later once a hosting target is selected.
+The [CI workflow](./.github/workflows/ci.yml) uses Java 21 and Maven to run `./mvnw clean test` on:
 
-This is CI plus container-image delivery, **not deployment of a running application**. Hosting still needs to be selected and configured with a PostgreSQL database and datasource credentials. The local database credentials are for development only.
+- pushes to `main` and `feature/**`
+- pull requests targeting `main`
 
-## Limitations
+CI currently validates tests only. It does not deploy an application or provision infrastructure.
 
-This project is for learning and local experimentation. It does not include production authentication, multi-tenant isolation, real payment processing, or deployment automation. See [Limitations](#limitations) for more details.
+## Repository structure
 
-## Learn more
-
-- [Architecture overview](#architecture-overview)
-- [API reference](#api-reference)
-- [Testing](#testing)
-- [Limitations](#limitations)
-- [Guided codebase study](./CODEBASE_LEARNING.md)
+```text
+.
+├── ledger/                 Spring Boot application and Maven project
+│   ├── src/main/java       Application source code
+│   ├── src/main/resources  Configuration, Flyway migrations, and logging
+│   └── docker-compose.yml  Local API and PostgreSQL services
+├── docs/                   Design and implementation notes
+└── docker-compose.yml      PostgreSQL-only local setup
+```
